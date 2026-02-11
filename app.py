@@ -200,6 +200,29 @@ def main():
         st.markdown("### Upload CSV File")
         st.caption("Upload a CSV file with country codes and VAT numbers")
 
+        # Rate limiting settings
+        with st.expander("⚙️ Advanced Settings (Rate Limiting)"):
+            col1, col2 = st.columns(2)
+            with col1:
+                request_delay = st.slider(
+                    "Delay between requests (seconds)",
+                    min_value=0.1,
+                    max_value=3.0,
+                    value=0.5,
+                    step=0.1,
+                    help="Adds a delay between each VIES API request to avoid rate limiting"
+                )
+            with col2:
+                max_retries = st.slider(
+                    "Maximum retries",
+                    min_value=1,
+                    max_value=5,
+                    value=3,
+                    step=1,
+                    help="Number of times to retry if a rate limit error occurs"
+                )
+            st.info("💡 If you encounter 'MS_MAX_CONCURRENT_REQ' errors, increase the delay or retries.")
+
         uploaded_file = st.file_uploader(
             "Choose a CSV file",
             type=["csv", "txt"],
@@ -243,7 +266,7 @@ def main():
 
                 # Validate button
                 if st.button("Validate All", type="primary", use_container_width=True):
-                    validator = VATValidator()
+                    validator = VATValidator(request_delay=request_delay, max_retries=max_retries)
                     results = []
 
                     # Progress bar

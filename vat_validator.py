@@ -4,6 +4,7 @@ Validates EU VAT numbers against the official VIES (VAT Information Exchange Sys
 """
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -74,8 +75,18 @@ class ValidationResult:
 class VATValidator:
     """Validates EU VAT numbers using the VIES SOAP API."""
 
-    def __init__(self):
+    def __init__(self, request_delay: float = 0.5, max_retries: int = 3):
+        """
+        Initialize the VAT validator.
+
+        Args:
+            request_delay: Delay between requests in seconds (default: 0.5)
+            max_retries: Maximum number of retries for rate-limited requests (default: 3)
+        """
         self._client = None
+        self.request_delay = request_delay
+        self.max_retries = max_retries
+        self._last_request_time = 0
 
     @property
     def client(self):
@@ -96,6 +107,19 @@ class VATValidator:
 
         pattern = VAT_PATTERNS[country_code]
         return bool(re.match(pattern, vat_number))
+
+    def _is_rate_limit_error(self, fault: Fault) -> bool:
+        """Check if the SOAP fault is a rate limit error."""
+        error_msg = str(fault).upper()
+        return "MS_MAX_CONCURRENT_REQ" in error_msg or "CONCURRENT" in error_msg
+
+    def _apply_rate_limit(self):
+        """Apply rate limiting delay between requests."""
+        if self.request_delay > 0:
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self.request_delay:
+                time.sleep(self.request_delay - elapsed)
+        self._last_request_time = time.time()
 
     def validate(self, country_code: str, vat_number: str) -> ValidationResult:
         """
@@ -127,51 +151,72 @@ class VATValidator:
             # Still try VIES API - format patterns might not be complete
             pass
 
-        try:
-            # Call VIES API
-            response = self.client.service.checkVat(
-                countryCode=country_code,
-                vatNumber=vat_number
-            )
+        # Retry logic for rate limiting
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Apply rate limiting delay
+                self._apply_rate_limit()
 
-            return ValidationResult(
-                country_code=country_code,
-                vat_number=vat_number,
-                is_valid=response.valid,
-                company_name=response.name if response.name != "---" else None,
-                company_address=response.address if response.address != "---" else None,
-                request_date=request_date
-            )
+                # Call VIES API
+                response = self.client.service.checkVat(
+                    countryCode=country_code,
+                    vatNumber=vat_number
+                )
 
-        except Fault as e:
-            # SOAP fault - usually means invalid VAT number
-            return ValidationResult(
-                country_code=country_code,
-                vat_number=vat_number,
-                is_valid=False,
-                request_date=request_date,
-                error_message=f"VIES error: {str(e)}"
-            )
+                return ValidationResult(
+                    country_code=country_code,
+                    vat_number=vat_number,
+                    is_valid=response.valid,
+                    company_name=response.name if response.name != "---" else None,
+                    company_address=response.address if response.address != "---" else None,
+                    request_date=request_date
+                )
 
-        except TransportError as e:
-            # Network or service unavailable
-            return ValidationResult(
-                country_code=country_code,
-                vat_number=vat_number,
-                is_valid=False,
-                request_date=request_date,
-                error_message=f"Service unavailable: {str(e)}"
-            )
+            except Fault as e:
+                # Check if it's a rate limit error
+                if self._is_rate_limit_error(e) and attempt < self.max_retries:
+                    # Exponential backoff: wait 2^attempt seconds
+                    wait_time = 2 ** attempt
+                    time.sleep(wait_time)
+                    continue  # Retry
 
-        except Exception as e:
-            # Unexpected error
-            return ValidationResult(
-                country_code=country_code,
-                vat_number=vat_number,
-                is_valid=False,
-                request_date=request_date,
-                error_message=f"Unexpected error: {str(e)}"
-            )
+                # Other SOAP faults - usually means invalid VAT number
+                return ValidationResult(
+                    country_code=country_code,
+                    vat_number=vat_number,
+                    is_valid=False,
+                    request_date=request_date,
+                    error_message=f"VIES error: {str(e)}"
+                )
+
+            except TransportError as e:
+                # Network or service unavailable
+                return ValidationResult(
+                    country_code=country_code,
+                    vat_number=vat_number,
+                    is_valid=False,
+                    request_date=request_date,
+                    error_message=f"Service unavailable: {str(e)}"
+                )
+
+            except Exception as e:
+                # Unexpected error
+                return ValidationResult(
+                    country_code=country_code,
+                    vat_number=vat_number,
+                    is_valid=False,
+                    request_date=request_date,
+                    error_message=f"Unexpected error: {str(e)}"
+                )
+
+        # If we exhausted all retries
+        return ValidationResult(
+            country_code=country_code,
+            vat_number=vat_number,
+            is_valid=False,
+            request_date=request_date,
+            error_message="Maximum retries exceeded due to rate limiting"
+        )
 
 
 def validate_batch(records: list[tuple[str, str]]) -> list[ValidationResult]:
