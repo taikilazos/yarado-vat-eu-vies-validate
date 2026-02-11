@@ -79,33 +79,13 @@ def parse_csv(uploaded_file) -> pd.DataFrame:
     raise ValueError("Could not parse CSV file. Please check the format.")
 
 
-def validate_dataframe(df: pd.DataFrame) -> tuple[list, list]:
+def extract_records(df: pd.DataFrame, country_col: str, vat_col: str) -> tuple[list, list]:
     """
-    Extract country codes and VAT numbers from dataframe.
+    Extract country codes and VAT numbers from dataframe using user-selected columns.
     Returns (records, errors) tuple.
     """
     records = []
     errors = []
-
-    # Find the columns (flexible naming)
-    country_col = None
-    vat_col = None
-
-    for col in df.columns:
-        col_lower = col.lower().replace("-", "").replace("_", "").replace(" ", "")
-        if "country" in col_lower or "state" in col_lower:
-            country_col = col
-        elif "vat" in col_lower:
-            vat_col = col
-
-    # Fallback to first two columns
-    if country_col is None and len(df.columns) >= 1:
-        country_col = df.columns[0]
-    if vat_col is None and len(df.columns) >= 2:
-        vat_col = df.columns[1]
-
-    if country_col is None or vat_col is None:
-        raise ValueError("Could not identify country and VAT columns.")
 
     for idx, row in df.iterrows():
         country = str(row[country_col]).strip().upper()
@@ -117,6 +97,15 @@ def validate_dataframe(df: pd.DataFrame) -> tuple[list, list]:
             errors.append(f"Row {idx + 1}: Invalid data")
 
     return records, errors
+
+
+def guess_column(columns: list[str], keywords: list[str]) -> int:
+    """Return the index of the first column whose name matches any keyword, else 0."""
+    for i, col in enumerate(columns):
+        col_lower = col.lower().replace("-", "").replace("_", "").replace(" ", "")
+        if any(kw in col_lower for kw in keywords):
+            return i
+    return 0
 
 
 def display_results(results: list[ValidationResult], processing_time: float):
@@ -204,30 +193,6 @@ def main():
     st.markdown('<p class="main-header">EU VAT Validator</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Automated VAT number validation against the official EU VIES system</p>', unsafe_allow_html=True)
 
-    # Sidebar
-    with st.sidebar:
-        st.markdown("## About")
-        st.info(
-            "This tool validates EU VAT numbers against the official "
-            "VIES (VAT Information Exchange System) maintained by the European Commission."
-        )
-
-        st.markdown("## Supported Countries")
-        st.write(", ".join(EU_COUNTRIES))
-
-        st.markdown("## Input Format")
-        st.code(
-            "%client-state%;%client-vat%\n"
-            "NL;860905494B01\n"
-            "FR;61420495178\n"
-            "FI;08974643",
-            language="csv"
-        )
-
-        st.markdown("---")
-        st.markdown("**Yarado Business Case Demo**")
-        st.caption("Demonstrating automated VAT validation workflow")
-
     # Main content - tabs
     tab1, tab2 = st.tabs(["Batch Validation", "Single Validation"])
 
@@ -250,8 +215,26 @@ def main():
                 st.dataframe(df.head(10), use_container_width=True, hide_index=True)
                 st.caption(f"Showing first 10 of {len(df)} rows")
 
+                # Let the user pick which columns to use
+                st.markdown("#### Select Columns")
+                col_left, col_right = st.columns(2)
+                columns = list(df.columns)
+
+                with col_left:
+                    country_col = st.selectbox(
+                        "Country code column",
+                        options=columns,
+                        index=guess_column(columns, ["country", "state", "land"]),
+                    )
+                with col_right:
+                    vat_col = st.selectbox(
+                        "VAT number column",
+                        options=columns,
+                        index=guess_column(columns, ["vat", "btw"]),
+                    )
+
                 # Extract records
-                records, parse_errors = validate_dataframe(df)
+                records, parse_errors = extract_records(df, country_col, vat_col)
 
                 if parse_errors:
                     st.warning(f"Found {len(parse_errors)} rows with invalid data")
